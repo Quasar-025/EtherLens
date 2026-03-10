@@ -2,6 +2,7 @@
 import express, { Request, Response } from 'express';
 import { JsonRpcProvider, isAddress } from 'ethers';
 import { disassembleBytecode } from './lib/disassembler';
+import { extractAndResolveSelectors } from './lib/extractor';
 import { CFGBuilder } from './lib/graph';
 import { SecurityAnalyzer } from './lib/security';
 import { fetchWithBackoff } from './lib/rpc';
@@ -52,6 +53,7 @@ app.post('/analyze', async (req: Request, res: Response) => {
         // --- Core Engine Execution ---
         const disassembly = disassembleBytecode(rawBytecode);
         const instructions = disassembly.instructions;
+        const selectorAnalysis = await extractAndResolveSelectors(instructions);
         
         const cfgBuilder = new CFGBuilder(instructions);
         const basicBlocks = cfgBuilder.build();
@@ -88,6 +90,7 @@ app.post('/analyze', async (req: Request, res: Response) => {
             },
             securityAnalysis: securityLogs.filter(log => log.includes('[!]') || log.includes('[✓]')),
             cfgAdjacencyList: adjacencyList,
+            selectorAnalysis,
             // Only return the first 50 instructions to keep the JSON payload lightweight
             disassemblyPreview: instructions.slice(0, 50) 
         });

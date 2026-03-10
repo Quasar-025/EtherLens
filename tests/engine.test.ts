@@ -1,6 +1,7 @@
 // tests/engine.test.ts
 import { describe, it, expect, vi } from 'vitest';
 import { disassembleBytecode } from '../lib/disassembler';
+import { extractAndResolveSelectors } from '../lib/extractor';
 import { CFGBuilder } from '../lib/graph';
 import { SecurityAnalyzer } from '../lib/security';
 import { fetchWithBackoff } from '../lib/rpc';
@@ -140,6 +141,106 @@ describe('EVM Reverse Engineering Engine - Edge Cases', () => {
 
             // Should fail after 2 attempts
             await expect(fetchWithBackoff(mockDeadRPC, 2, 10)).rejects.toThrow(/RPC Operation failed/);
+        });
+    });
+
+    describe('4. Selector Extraction & Resolution', () => {
+        it('should parse strict dispatch entries and resolve collisions deterministically', async () => {
+            const bytecode =
+                '0x' +
+                '63a9059cbb1461001057' + // transfer selector check
+                '63095ea7b31461002057' + // approve selector check
+                '600435' +               // CALLDATALOAD at offset 0x04
+                '602435' +               // CALLDATALOAD at offset 0x24
+                '00';
+
+            const result = disassembleBytecode(bytecode);
+            const instructions = result.instructions;
+
+            const mockFetch = vi.fn(async (url: string) => {
+                if (url.includes('a9059cbb')) {
+                    return {
+                        ok: true,
+                        json: async () => ({
+                            count: 2,
+                            results: [
+                                { text_signature: 'many_msg_babbage(bytes1)' },
+                                { text_signature: 'transfer(address,uint256)' }
+                            ]
+                        })
+                    };
+                }
+
+                return {
+                    ok: true,
+                    json: async () => ({
+                        count: 2,
+                        results: [
+                            { text_signature: 'approve(bytes,uint256)' },
+                            { text_signature: 'approve(address,uint256)' }
+                        ]
+                    })
+                };
+            });
+
+            const analysis = await extractAndResolveSelectors(instructions, { fetchFn: mockFetch as any });
+
+            expect(analysis.dispatchEntries).toHaveLength(2);
+            expect(analysis.dispatchEntries[0].selector).toBe('0xa9059cbb');
+            expect(analysis.dispatchEntries[0].jumpDestination).toBe(0x10);
+            expect(analysis.dispatchEntries[1].selector).toBe('0x095ea7b3');
+            expect(analysis.dispatchEntries[1].jumpDestination).toBe(0x20);
+
+            expect(analysis.uniqueSelectors).toEqual(['0x095ea7b3', '0xa9059cbb']);
+
+            const transferResolution = analysis.resolutions.find(r => r.selector === '0xa9059cbb');
+            expect(transferResolution?.status).toBe('resolved');
+            expect(transferResolution?.selectedSignature).toBe('transfer(address,uint256)');
+            expect(transferResolution?.collision).toBe(true);
+
+            const approveResolution = analysis.resolutions.find(r => r.selector === '0x095ea7b3');
+            expect(approveResolution?.status).toBe('resolved');
+            expect(approveResolution?.selectedSignature).toBe('approve(address,uint256)');
+            expect(approveResolution?.collision).toBe(true);
+            expect(approveResolution?.candidateSignatures).toHaveLength(2);
+
+            expect(analysis.abiHeuristics.maxCallDataOffset).toBe(0x24);
+            expect(analysis.abiHeuristics.minimumParameterCount).toBe(2);
+            expect(mockFetch).toHaveBeenCalledTimes(2);
+        });
+
+        it('should mark selectors unresolved when 4byte returns no results', async () => {
+            const bytecode = '0x63deadbeef146100105700';
+            const instructions = disassembleBytecode(bytecode).instructions;
+
+            const mockFetch = vi.fn(async () => ({
+                ok: true,
+                json: async () => ({ count: 0, results: [] })
+            }));
+
+            const analysis = await extractAndResolveSelectors(instructions, { fetchFn: mockFetch as any });
+
+            expect(analysis.dispatchEntries).toHaveLength(1);
+            expect(analysis.resolutions).toHaveLength(1);
+            expect(analysis.resolutions[0].status).toBe('unresolved');
+            expect(analysis.resolutions[0].selectedSignature).toBeNull();
+            expect(analysis.resolutions[0].collision).toBe(false);
+        });
+
+        it('should mark selector resolution as error when API call fails', async () => {
+            const bytecode = '0x63ffffffff146100105700';
+            const instructions = disassembleBytecode(bytecode).instructions;
+
+            const mockFetch = vi.fn(async () => {
+                throw new Error('network down');
+            });
+
+            const analysis = await extractAndResolveSelectors(instructions, { fetchFn: mockFetch as any });
+
+            expect(analysis.dispatchEntries).toHaveLength(1);
+            expect(analysis.resolutions).toHaveLength(1);
+            expect(analysis.resolutions[0].status).toBe('error');
+            expect(analysis.resolutions[0].error).toContain('network down');
         });
     });
 });

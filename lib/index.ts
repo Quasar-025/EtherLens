@@ -1,6 +1,6 @@
 import { JsonRpcProvider } from "ethers";
 import { disassembleBytecode } from "./disassembler";
-import { extractAndResolveSelectors } from "./extractor";
+import { extractAndResolveSelectors, formatSelectorAnalysis } from "./extractor";
 import { CFGBuilder } from "./graph";
 import * as fs from "fs";
 import { SecurityAnalyzer } from "./security";
@@ -54,7 +54,11 @@ async function main() {
             
             console.log(`${offsetHex} |  ${opcodeHex} | ${inst.mnemonic.padEnd(8)} | ${operandStr}`);
         }
-        await extractAndResolveSelectors(instructions);
+        console.log("\n--- FUNCTION SELECTORS ---");
+        const selectorAnalysis = await extractAndResolveSelectors(instructions);
+        for (const line of formatSelectorAnalysis(selectorAnalysis)) {
+            console.log(line);
+        }
 
         const cfg = new CFGBuilder(instructions);
         const basicBlocks = cfg.build();

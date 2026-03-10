@@ -1,6 +1,6 @@
 import { JsonRpcProvider, isAddress } from "ethers";
 import { disassembleBytecode } from "./lib/disassembler";
-import { extractAndResolveSelectors } from "./lib/extractor";
+import { extractAndResolveSelectors, formatSelectorAnalysis, SelectorAnalysisResult } from "./lib/extractor";
 import { BasicBlock, CFGBuilder } from "./lib/graph";
 import { SecurityAnalyzer } from "./lib/security";
 import { fetchWithBackoff } from "./lib/rpc";
@@ -60,11 +60,18 @@ async function main() {
 
         let cfgBuilder: CFGBuilder | null = null;
         let basicBlocks: BasicBlock[] = [];
+        let selectorAnalysis: SelectorAnalysisResult | null = null;
 
         const ensureCfg = () => {
             if (!cfgBuilder) {
                 cfgBuilder = new CFGBuilder(instructions);
                 basicBlocks = cfgBuilder.build();
+            }
+        };
+
+        const ensureSelectorAnalysis = async () => {
+            if (!selectorAnalysis) {
+                selectorAnalysis = await extractAndResolveSelectors(instructions);
             }
         };
 
@@ -84,6 +91,10 @@ async function main() {
             if (runCfg || runAll) {
                 ensureCfg();
                 report.cfg = JSON.parse(cfgBuilder!.getJsonAdjacencyList());
+            }
+            if (runSelectors || runAll) {
+                await ensureSelectorAnalysis();
+                report.selectorAnalysis = selectorAnalysis;
             }
             console.log(JSON.stringify(report, null, 2));
             return; 
@@ -124,7 +135,10 @@ async function main() {
 
         if (runSelectors || runAll) {
             console.log(`\n--- FUNCTION SELECTORS ---`);
-            await extractAndResolveSelectors(instructions);
+            await ensureSelectorAnalysis();
+            for (const line of formatSelectorAnalysis(selectorAnalysis!)) {
+                console.log(line);
+            }
         }
 
         if (runCfg || runAll) {
