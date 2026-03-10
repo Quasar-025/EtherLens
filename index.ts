@@ -3,6 +3,7 @@ import { disassembleBytecode } from "./disassembler";
 import { extractAndResolveSelectors } from "./extractor";
 import { CFGBuilder } from "./graph";
 import * as fs from "fs";
+import { SecurityAnalyzer } from "./security";
 
 async function main() {
     // Basic CLI Argument Parsing
@@ -47,7 +48,7 @@ async function main() {
         await extractAndResolveSelectors(instructions);
 
         const cfg = new CFGBuilder(instructions);
-        cfg.build();
+        const basicBlocks = cfg.build();
         // Export JSON Adjacency List
         const jsonGraph = cfg.getJsonAdjacencyList();
         fs.writeFileSync("cfg.json", jsonGraph);
@@ -55,6 +56,10 @@ async function main() {
 
         // Export DOT (and SVG if --svg flag is passed)
         cfg.exportToDot("cfg.dot", generateSvg);
+
+        // Security Analysis
+        const securityAnalyzer = new SecurityAnalyzer(instructions, basicBlocks, provider, targetAddress);
+        await securityAnalyzer.analyze();
     } catch (error) {
         console.error("Error fetching or parsing bytecode:", error);
     }

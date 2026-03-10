@@ -24,11 +24,12 @@ export class CFGBuilder {
         this.instructions = instructions;
     }
 
-    public build() {
+    public build(): BasicBlock[] { // <-- Add the return type here
         console.log("\n[Phase 3] Building Control Flow Graph...");
         this.partitionBlocks();
         this.resolveEdges();
         this.printMetrics();
+        return this.blocks; // <-- ADD THIS LINE!
     }
 
     // --- REQUIREMENT 1: Partition into Basic Blocks ---
