@@ -1,8 +1,7 @@
-// cli.ts
-import { JsonRpcProvider } from "ethers";
+import { JsonRpcProvider, isAddress } from "ethers";
 import { disassembleBytecode } from "./lib/disassembler";
 import { extractAndResolveSelectors } from "./lib/extractor";
-import { CFGBuilder } from "./lib/graph";
+import { BasicBlock, CFGBuilder } from "./lib/graph";
 import { SecurityAnalyzer } from "./lib/security";
 import { fetchWithBackoff } from "./lib/rpc";
 
@@ -13,18 +12,21 @@ const RPC_URLS: Record<string, string> = {
     arbitrum: "https://arb1.arbitrum.io/rpc"
 };
 
+const DEFAULT_DISASSEMBLY_PREVIEW_LIMIT = 20;
+
 async function main() {
     const args = process.argv.slice(2);
     
     if (args.length === 0 || args.includes("--help")) {
         console.log("Usage: analyzer <address> --chain <chain> --output <json|text|dot> [flags]");
         console.log("Flags: --disasm, --selectors, --cfg, --security");
+        console.log(`Default disassembly output is preview mode (${DEFAULT_DISASSEMBLY_PREVIEW_LIMIT} rows). Use --disasm for full output.`);
         return;
     }
 
     // Parse Arguments
-    const address = args.find(a => a.startsWith("0x") && a.length === 42);
-    if (!address) return console.error("Error: Please provide a valid 42-character 0x contract address.");
+    const address = args.find(a => isAddress(a));
+    if (!address) return console.error("Error: Please provide a valid Ethereum contract address.");
 
     const chainIndex = args.indexOf("--chain");
     const chain = chainIndex !== -1 ? args[chainIndex + 1].toLowerCase() : "ethereum";
@@ -53,31 +55,69 @@ async function main() {
         if (rawBytecode === "0x") return console.error("No bytecode found at this address.");
 
         // --- CORE ENGINE ---
-        const instructions = disassembleBytecode(rawBytecode);
-        const cfgBuilder = new CFGBuilder(instructions);
-        const basicBlocks = cfgBuilder.build();
+        const disassembly = disassembleBytecode(rawBytecode);
+        const instructions = disassembly.instructions;
+
+        let cfgBuilder: CFGBuilder | null = null;
+        let basicBlocks: BasicBlock[] = [];
+
+        const ensureCfg = () => {
+            if (!cfgBuilder) {
+                cfgBuilder = new CFGBuilder(instructions);
+                basicBlocks = cfgBuilder.build();
+            }
+        };
 
         // --- OUTPUT: JSON ---
         if (outputFormat === "json") {
             const report: any = { metadata: { address, chain } };
-            if (runDisasm || runAll) report.disassembly = instructions.slice(0, 100); 
-            if (runCfg || runAll) report.cfg = JSON.parse(cfgBuilder.getJsonAdjacencyList());
+            if (runDisasm || runAll) {
+                if (runDisasm) {
+                    report.disassembly = instructions;
+                } else {
+                    report.disassembly = instructions.slice(0, DEFAULT_DISASSEMBLY_PREVIEW_LIMIT);
+                    report.disassemblyPreview = true;
+                    report.disassemblyPreviewLimit = DEFAULT_DISASSEMBLY_PREVIEW_LIMIT;
+                    report.totalInstructions = instructions.length;
+                }
+            }
+            if (runCfg || runAll) {
+                ensureCfg();
+                report.cfg = JSON.parse(cfgBuilder!.getJsonAdjacencyList());
+            }
             console.log(JSON.stringify(report, null, 2));
             return; 
         }
 
         // --- OUTPUT: DOT ---
         if (outputFormat === "dot") {
-            cfgBuilder.exportToDot("cli_output.dot", false);
+            ensureCfg();
+            cfgBuilder!.exportToDot("cli_output.dot", false);
             console.log("Saved CFG to cli_output.dot");
             return;
         }
 
         // --- OUTPUT: TEXT (Default) ---
         if (runDisasm || runAll) {
-            console.log(`\n--- DISASSEMBLY (First 15 Opcodes) ---`);
-            for (let i = 0; i < Math.min(15, instructions.length); i++) {
-                const inst = instructions[i];
+            const previewMode = runAll && !runDisasm;
+            const disassemblyRows = previewMode
+                ? instructions.slice(0, DEFAULT_DISASSEMBLY_PREVIEW_LIMIT)
+                : instructions;
+
+            console.log(`\n--- DISASSEMBLY ${previewMode ? `(First ${DEFAULT_DISASSEMBLY_PREVIEW_LIMIT} Rows)` : "(Full)"} ---`);
+            if (disassembly.metadata.detected) {
+                console.log(`[+] CBOR metadata trailer detected (${disassembly.metadata.metadataLength} bytes).`);
+                console.log(`[+] Solidity compiler: ${disassembly.metadata.solidityVersion || "Unknown"}`);
+            } else {
+                console.log(`[+] CBOR metadata trailer not detected.`);
+            }
+
+            if (previewMode && instructions.length > DEFAULT_DISASSEMBLY_PREVIEW_LIMIT) {
+                console.log(`[+] Showing ${DEFAULT_DISASSEMBLY_PREVIEW_LIMIT} of ${instructions.length} rows. Use --disasm for full output.`);
+            }
+
+            for (let i = 0; i < disassemblyRows.length; i++) {
+                const inst = disassemblyRows[i];
                 console.log(`0x${inst.offset.toString(16).padStart(4,'0')}: ${inst.opcode.toString(16).padStart(2,'0')} ${inst.mnemonic} ${inst.operand || ''}`);
             }
         }
@@ -88,12 +128,14 @@ async function main() {
         }
 
         if (runCfg || runAll) {
+            ensureCfg();
             console.log(`\n--- CONTROL FLOW GRAPH ---`);
             console.log(`Blocks Generated: ${basicBlocks.length}`);
-            console.log(`Jump Resolution: ${cfgBuilder.staticJumps} Static, ${cfgBuilder.dynamicJumps} Dynamic.`);
+            console.log(`Jump Resolution: ${cfgBuilder!.staticJumps} Static, ${cfgBuilder!.dynamicJumps} Dynamic.`);
         }
 
         if (runSecurity || runAll) {
+            ensureCfg();
             console.log(`\n--- SECURITY ANALYSIS ---`);
             const security = new SecurityAnalyzer(instructions, basicBlocks, provider, address);
             await security.analyze();

@@ -1,6 +1,6 @@
 // api.ts
 import express, { Request, Response } from 'express';
-import { JsonRpcProvider } from 'ethers';
+import { JsonRpcProvider, isAddress } from 'ethers';
 import { disassembleBytecode } from './lib/disassembler';
 import { CFGBuilder } from './lib/graph';
 import { SecurityAnalyzer } from './lib/security';
@@ -26,8 +26,8 @@ app.post('/analyze', async (req: Request, res: Response) => {
 
     const { address, chain = "ethereum" } = req.body;
 
-    if (!address || address.length !== 42 || !address.startsWith("0x")) {
-        res.status(400).json({ error: "Invalid Ethereum contract address. Must be a 42-character 0x string." });
+    if (!address || typeof address !== "string" || !isAddress(address)) {
+        res.status(400).json({ error: "Invalid Ethereum contract address." });
         return;
     }
 
@@ -50,7 +50,8 @@ app.post('/analyze', async (req: Request, res: Response) => {
         }
 
         // --- Core Engine Execution ---
-        const instructions = disassembleBytecode(rawBytecode);
+        const disassembly = disassembleBytecode(rawBytecode);
+        const instructions = disassembly.instructions;
         
         const cfgBuilder = new CFGBuilder(instructions);
         const basicBlocks = cfgBuilder.build();
@@ -77,6 +78,12 @@ app.post('/analyze', async (req: Request, res: Response) => {
                 jumpResolution: {
                     static: cfgBuilder.staticJumps,
                     dynamic: cfgBuilder.dynamicJumps
+                },
+                disassembly: {
+                    metadataDetected: disassembly.metadata.detected,
+                    metadataLength: disassembly.metadata.metadataLength,
+                    cborValid: disassembly.metadata.cborValid,
+                    solidityVersion: disassembly.metadata.solidityVersion
                 }
             },
             securityAnalysis: securityLogs.filter(log => log.includes('[!]') || log.includes('[✓]')),

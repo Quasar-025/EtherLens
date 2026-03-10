@@ -32,7 +32,15 @@ async function main() {
         }
         // console.log("Raw Bytecode:", rawBytecode);
         console.log("Disassembling...");
-        const instructions = disassembleBytecode(rawBytecode);
+        const disassembly = disassembleBytecode(rawBytecode);
+        const instructions = disassembly.instructions;
+
+        if (disassembly.metadata.detected) {
+            console.log(`[+] CBOR metadata trailer detected (${disassembly.metadata.metadataLength} bytes).`);
+            console.log(`[+] Solidity compiler: ${disassembly.metadata.solidityVersion || "Unknown"}`);
+        } else {
+            console.log("[+] CBOR metadata trailer not detected.");
+        }
 
         console.log("OFFSET | HEX | MNEMONIC | OPERAND");
         console.log("-".repeat(40));
