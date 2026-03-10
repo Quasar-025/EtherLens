@@ -12,7 +12,8 @@ describe('EVM Reverse Engineering Engine - Edge Cases', () => {
             // 0x61 is PUSH2 (expects 2 bytes of data). But we only give it 1 byte (0xff).
             // A naive loop will throw an OutOfBounds error here.
             const malformedBytecode = "0x61ff"; 
-            const instructions = disassembleBytecode(malformedBytecode);
+            const result = disassembleBytecode(malformedBytecode);
+            const instructions = result.instructions;
             
             expect(instructions.length).toBe(1);
             expect(instructions[0].mnemonic).toBe("PUSH2");
@@ -24,7 +25,8 @@ describe('EVM Reverse Engineering Engine - Edge Cases', () => {
             // 0x7f (PUSH32) followed by 32 bytes of 0xff (which is SELFDESTRUCT).
             // If the disassembler doesn't skip the data payload, it will falsely flag a self-destruct.
             const bytecode = "0x7f" + "ff".repeat(32) + "00";
-            const instructions = disassembleBytecode(bytecode);
+            const result = disassembleBytecode(bytecode);
+            const instructions = result.instructions;
             
             expect(instructions.length).toBe(2);
             expect(instructions[0].mnemonic).toBe("PUSH32");
@@ -33,6 +35,49 @@ describe('EVM Reverse Engineering Engine - Edge Cases', () => {
             // Prove no SELFDESTRUCT was accidentally parsed from the data
             const hasSelfDestruct = instructions.some(i => i.opcode === 0xff);
             expect(hasSelfDestruct).toBe(false);
+        });
+
+        it('should parse PUSH0 as a zero-operand instruction', () => {
+            const bytecode = "0x5f00";
+            const result = disassembleBytecode(bytecode);
+            const instructions = result.instructions;
+
+            expect(instructions.length).toBe(2);
+            expect(instructions[0].mnemonic).toBe("PUSH0");
+            expect(instructions[0].operand).toBeNull();
+            expect(instructions[1].mnemonic).toBe("STOP");
+        });
+    });
+
+    describe('1b. CBOR Metadata Handling', () => {
+        it('should detect and strip valid Solidity CBOR metadata', () => {
+            // Executable: PUSH1 0x00, PUSH1 0x00, JUMP
+            // Metadata: a1 64 736f6c63 43 000813  ( { "solc": h'000813' } )
+            const bytecodeWithMetadata = "0x6000600056a164736f6c6343000813000a";
+            const result = disassembleBytecode(bytecodeWithMetadata);
+
+            expect(result.metadata.detected).toBe(true);
+            expect(result.metadata.cborValid).toBe(true);
+            expect(result.metadata.metadataLength).toBe(10);
+            expect(result.metadata.solidityVersion).toBe("0.8.19");
+            expect(result.executableBytecodeHex).toBe("6000600056");
+
+            const instructions = result.instructions;
+            expect(instructions.length).toBe(3);
+            expect(instructions[0].mnemonic).toBe("PUSH1");
+            expect(instructions[1].mnemonic).toBe("PUSH1");
+            expect(instructions[2].mnemonic).toBe("JUMP");
+        });
+
+        it('should keep full bytecode when trailer length points to invalid CBOR', () => {
+            // Last 2 bytes claim 2-byte metadata trailer (0x0002), but bytes are invalid CBOR payload.
+            const malformedTrailer = "0x60016002abcf0002";
+            const result = disassembleBytecode(malformedTrailer);
+
+            expect(result.metadata.detected).toBe(false);
+            expect(result.metadata.cborValid).toBe(false);
+            expect(result.metadata.solidityVersion).toBeNull();
+            expect(result.executableBytecodeHex).toBe("60016002abcf0002");
         });
     });
 
@@ -43,7 +88,8 @@ describe('EVM Reverse Engineering Engine - Edge Cases', () => {
             // Block 1: STOP (0x00)
             // Block 2: JUMPDEST (0x5b), SELFDESTRUCT (0xff)
             const simulatedHackerContract = "0x6080600657005bff";
-            const instructions = disassembleBytecode(simulatedHackerContract);
+            const result = disassembleBytecode(simulatedHackerContract);
+            const instructions = result.instructions;
             
             const cfg = new CFGBuilder(instructions);
             const blocks = cfg.build();
