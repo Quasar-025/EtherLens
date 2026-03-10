@@ -4,6 +4,7 @@ import { extractAndResolveSelectors } from "./extractor";
 import { CFGBuilder } from "./graph";
 import * as fs from "fs";
 import { SecurityAnalyzer } from "./security";
+import { fetchWithBackoff } from "./rpc";
 
 async function main() {
     // Basic CLI Argument Parsing
@@ -23,7 +24,7 @@ async function main() {
     console.log(`Fetching bytecode for: ${targetAddress}...`);
 
     try {
-        const rawBytecode = await provider.getCode(targetAddress);
+        const rawBytecode = await fetchWithBackoff(() => provider.getCode(targetAddress));
         
         if (rawBytecode === "0x") {
             console.log("No bytecode found.");

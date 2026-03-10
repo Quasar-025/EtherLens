@@ -2,6 +2,7 @@
 import { Instruction } from "./disassembler";
 import { BasicBlock } from "./graph";
 import { JsonRpcProvider } from "ethers";
+import { fetchWithBackoff } from "./rpc";
 
 export class SecurityAnalyzer {
     private instructions: Instruction[];
@@ -36,8 +37,8 @@ export class SecurityAnalyzer {
             const eip1967Slot = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
             const legacySlot = "0x7050c9e0f4ca769c69bd3a8ef740bc37934f8e2c036e5a723fd8ee048ed3f8c3";
             try {
-                const val1967 = await this.provider.getStorage(this.address, eip1967Slot);
-                const valLegacy = await this.provider.getStorage(this.address, legacySlot);
+                const val1967 = await fetchWithBackoff(() => this.provider.getStorage(this.address, eip1967Slot));
+                const valLegacy = await fetchWithBackoff(() => this.provider.getStorage(this.address, legacySlot));
                 const isEmpty = (val: string) => val === "0x" || val === "0x0000000000000000000000000000000000000000000000000000000000000000";
 
                 if (!isEmpty(val1967)) {
