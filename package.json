@@ -6,6 +6,9 @@
   "scripts": {
     "test": "vitest run"
   },
+  "bin": {
+    "analyzer": "./bin/analyzer.js"
+  },
   "keywords": [],
   "author": "",
   "license": "ISC",
