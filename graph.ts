@@ -25,7 +25,7 @@ export class CFGBuilder {
     }
 
     public build(): BasicBlock[] { // <-- Add the return type here
-        console.log("\n[Phase 3] Building Control Flow Graph...");
+        console.log("\nBuilding Control Flow Graph...");
         this.partitionBlocks();
         this.resolveEdges();
         this.printMetrics();

@@ -17,7 +17,7 @@ export class SecurityAnalyzer {
     }
 
     public async analyze() {
-        console.log("\n[Phase 4] Running Security Heuristics...");
+        console.log("\nRunning Security Heuristics...");
         
         this.detectSelfDestruct();
         this.detectUncheckedCalls();
@@ -65,26 +65,37 @@ export class SecurityAnalyzer {
     }
 
     // Pattern 3: Proxy Contract (EIP-1967)
+    // Pattern 3: Proxy Contract (EIP-1967 & Legacy)
     private async detectProxyPattern() {
         const hasDelegateCall = this.instructions.some(inst => inst.opcode === 0xf4); // 0xf4 is DELEGATECALL
 
         if (hasDelegateCall) {
+            console.log("[?] DELEGATECALL detected. Checking common Proxy storage slots...");
+            
             // Standard EIP-1967 Implementation Slot
-            const implementationSlot = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
+            const eip1967Slot = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
+            
+            // Legacy Zeppelinos Proxy Slot (Used by USDC and older contracts)
+            // It is the keccak256 hash of "org.zeppelinos.proxy.implementation"
+            const legacySlot = "0x7050c9e0f4ca769c69bd3a8ef740bc37934f8e2c036e5a723fd8ee048ed3f8c3";
             
             try {
-                // Fetch the live storage state of this specific slot
-                const slotValue = await this.provider.getStorage(this.address, implementationSlot);
+                const val1967 = await this.provider.getStorage(this.address, eip1967Slot);
+                const valLegacy = await this.provider.getStorage(this.address, legacySlot);
                 
-                // If it's not empty, it holds an address
-                if (slotValue !== "0x" && slotValue !== "0x0000000000000000000000000000000000000000000000000000000000000000") {
-                    const implAddress = "0x" + slotValue.substring(26);
-                    console.log(`[!] Pattern 3: PROXY DETECTED. Logic delegated to: ${implAddress}`);
+                const isEmpty = (val: string) => val === "0x" || val === "0x0000000000000000000000000000000000000000000000000000000000000000";
+
+                if (!isEmpty(val1967)) {
+                    const implAddress = "0x" + val1967.substring(26);
+                    console.log(`[!] PROXY DETECTED (EIP-1967). Logic delegated to: ${implAddress}`);
+                } else if (!isEmpty(valLegacy)) {
+                    const implAddress = "0x" + valLegacy.substring(26);
+                    console.log(`[!] PROXY DETECTED (Legacy Zeppelinos). Logic delegated to: ${implAddress}`);
                 } else {
-                    console.log("[✓] Pattern 3: DELEGATECALL used, but EIP-1967 slots are empty (Not a standard proxy).");
+                    console.log("[✓] DELEGATECALL is used, but standard proxy slots are empty. Might be a custom proxy.");
                 }
             } catch (error) {
-                console.log("[-] Pattern 3: Failed to query storage slots for Proxy detection.");
+                console.log("[-] Failed to query storage slots for Proxy detection.");
             }
         } else {
              console.log("[✓] Pattern 3: No DELEGATECALL opcode found. Not a proxy contract.");
@@ -95,16 +106,16 @@ export class SecurityAnalyzer {
     private detectPayableFunctions() {
         let hasPayableModifier = false;
         
-        // Scan early blocks for the CALLVALUE -> ISZERO -> REVERT pattern
-        // If a contract is entirely non-payable, it usually checks CALLVALUE near the top of the dispatch table.
-        for (let i = 0; i < Math.min(50, this.instructions.length - 2); i++) {
+        for (let i = 0; i < Math.min(50, this.instructions.length - 3); i++) {
             const op1 = this.instructions[i];
             const op2 = this.instructions[i+1];
+            const op3 = this.instructions[i+2];
             
-            // 0x34 is CALLVALUE, 0x15 is ISZERO
+            // Check for CALLVALUE -> ISZERO or CALLVALUE -> DUP1 -> ISZERO
             if (op1.opcode === 0x34 && op2.opcode === 0x15) {
-                hasPayableModifier = true;
-                break;
+                hasPayableModifier = true; break;
+            } else if (op1.opcode === 0x34 && op2.opcode === 0x80 && op3.opcode === 0x15) {
+                hasPayableModifier = true; break;
             }
         }
 
