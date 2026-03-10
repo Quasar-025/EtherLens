@@ -50,8 +50,6 @@ export async function extractAndResolveSelectors(instructions: Instruction[]) {
         }
     }
 
-    console.log(`Found ${selectors.size} unique functions! Resolving signatures...\n`);
-
     // Query the 4byte.directory API to crack the hashes back into readable text
     for (const selector of selectors) {
         try {
