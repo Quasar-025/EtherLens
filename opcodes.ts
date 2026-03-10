@@ -1,4 +1,3 @@
-// opcodes.ts
 export const OPCODES: Record<number, string> = {
     0x00: "STOP",
     0x01: "ADD",
@@ -24,6 +23,11 @@ export const OPCODES: Record<number, string> = {
     0x16: "AND",
     0x35: "CALLDATALOAD",
     0x63: "PUSH4",
+    0x1b: "SHL",
+    0x1c: "SHR",
+    0x1d: "SAR",
+    0x3f: "EXTCODEHASH",
+    0xf5: "CREATE2",
 };
 
 // Programmatically add PUSH1 (0x60) through PUSH32 (0x7f)
