@@ -5,7 +5,7 @@ import { CFGBuilder } from '../lib/graph';
 import { SecurityAnalyzer } from '../lib/security';
 import { fetchWithBackoff } from '../lib/rpc';
 
-describe('EVM Reverse Engineering Engine - Brutal Edge Cases', () => {
+describe('EVM Reverse Engineering Engine - Edge Cases', () => {
 
     describe('1. Disassembler Robustness (Malformed Bytecode)', () => {
         it('should handle EOF during a PUSH instruction without crashing', () => {
@@ -23,7 +23,7 @@ describe('EVM Reverse Engineering Engine - Brutal Edge Cases', () => {
         it('should correctly skip bytes for PUSH32 to avoid false opcode detection', () => {
             // 0x7f (PUSH32) followed by 32 bytes of 0xff (which is SELFDESTRUCT).
             // If the disassembler doesn't skip the data payload, it will falsely flag a self-destruct.
-            const bytecode = "0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff00";
+            const bytecode = "0x7f" + "ff".repeat(32) + "00";
             const instructions = disassembleBytecode(bytecode);
             
             expect(instructions.length).toBe(2);
@@ -42,7 +42,7 @@ describe('EVM Reverse Engineering Engine - Brutal Edge Cases', () => {
             // Block 0: PUSH1 0x80, PUSH1 0x40, JUMPI (to Block 2)
             // Block 1: STOP (0x00)
             // Block 2: JUMPDEST (0x5b), SELFDESTRUCT (0xff)
-            const simulatedHackerContract = "0x6080604057005bff";
+            const simulatedHackerContract = "0x6080600657005bff";
             const instructions = disassembleBytecode(simulatedHackerContract);
             
             const cfg = new CFGBuilder(instructions);
