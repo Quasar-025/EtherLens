@@ -57,7 +57,8 @@ app.post('/analyze', async (req: Request, res: Response) => {
         
         const cfgBuilder = new CFGBuilder(instructions);
         const basicBlocks = cfgBuilder.build();
-        const adjacencyList = JSON.parse(cfgBuilder.getJsonAdjacencyList());
+        const adjacencyList = JSON.parse(cfgBuilder.getJsonAdjacencyList(true));
+        const jumpResolution = cfgBuilder.getJumpResolutionStats();
 
         // We capture security logs by hijacking console.log temporarily for the API response
         const securityLogs: string[] = [];
@@ -78,8 +79,11 @@ app.post('/analyze', async (req: Request, res: Response) => {
                 totalInstructions: instructions.length,
                 totalBlocks: basicBlocks.length,
                 jumpResolution: {
-                    static: cfgBuilder.staticJumps,
-                    dynamic: cfgBuilder.dynamicJumps
+                    static: jumpResolution.staticJumps,
+                    dynamic: jumpResolution.dynamicJumps,
+                    total: jumpResolution.totalJumps,
+                    staticPercentage: jumpResolution.staticPercentage,
+                    dynamicPercentage: jumpResolution.dynamicPercentage
                 },
                 disassembly: {
                     metadataDetected: disassembly.metadata.detected,

@@ -19,8 +19,9 @@ async function main() {
     
     if (args.length === 0 || args.includes("--help")) {
         console.log("Usage: analyzer <address> --chain <chain> --output <json|text|dot> [flags]");
-        console.log("Flags: --disasm, --selectors, --cfg, --security");
+        console.log("Flags: --disasm, --selectors, --cfg, --security, --svg");
         console.log(`Default disassembly output is preview mode (${DEFAULT_DISASSEMBLY_PREVIEW_LIMIT} rows). Use --disasm for full output.`);
+        console.log("Use --svg with --output dot to generate an SVG if Graphviz is installed.");
         return;
     }
 
@@ -38,6 +39,7 @@ async function main() {
     const runSelectors = args.includes("--selectors");
     const runCfg = args.includes("--cfg");
     const runSecurity = args.includes("--security");
+    const generateSvg = args.includes("--svg");
     
     // If no specific flags are provided, run everything
     const runAll = !runDisasm && !runSelectors && !runCfg && !runSecurity;
@@ -62,10 +64,12 @@ async function main() {
         let basicBlocks: BasicBlock[] = [];
         let selectorAnalysis: SelectorAnalysisResult | null = null;
 
+        const cfgSilentMode = outputFormat === "json";
+
         const ensureCfg = () => {
             if (!cfgBuilder) {
                 cfgBuilder = new CFGBuilder(instructions);
-                basicBlocks = cfgBuilder.build();
+                basicBlocks = cfgBuilder.build({ silent: cfgSilentMode });
             }
         };
 
@@ -90,7 +94,9 @@ async function main() {
             }
             if (runCfg || runAll) {
                 ensureCfg();
-                report.cfg = JSON.parse(cfgBuilder!.getJsonAdjacencyList());
+                report.cfg = JSON.parse(cfgBuilder!.getJsonAdjacencyList(true));
+                report.cfgJumpResolution = cfgBuilder!.getJumpResolutionStats();
+                cfgBuilder!.exportToJson("cli_output.json");
             }
             if (runSelectors || runAll) {
                 await ensureSelectorAnalysis();
@@ -103,7 +109,7 @@ async function main() {
         // --- OUTPUT: DOT ---
         if (outputFormat === "dot") {
             ensureCfg();
-            cfgBuilder!.exportToDot("cli_output.dot", false);
+            cfgBuilder!.exportToDot("cli_output.dot", generateSvg);
             console.log("Saved CFG to cli_output.dot");
             return;
         }
@@ -143,9 +149,11 @@ async function main() {
 
         if (runCfg || runAll) {
             ensureCfg();
+            const stats = cfgBuilder!.getJumpResolutionStats();
             console.log(`\n--- CONTROL FLOW GRAPH ---`);
             console.log(`Blocks Generated: ${basicBlocks.length}`);
-            console.log(`Jump Resolution: ${cfgBuilder!.staticJumps} Static, ${cfgBuilder!.dynamicJumps} Dynamic.`);
+            console.log(`Jump Resolution: ${stats.staticJumps} Static, ${stats.dynamicJumps} Dynamic.`);
+            console.log(`Static Resolution: ${stats.staticPercentage.toFixed(2)}%`);
         }
 
         if (runSecurity || runAll) {

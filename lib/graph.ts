@@ -11,6 +11,14 @@ export interface BasicBlock {
     hasDynamicJump: boolean; // Flag if we couldn't resolve the jump target
 }
 
+export interface JumpResolutionStats {
+    staticJumps: number;
+    dynamicJumps: number;
+    totalJumps: number;
+    staticPercentage: number;
+    dynamicPercentage: number;
+}
+
 export class CFGBuilder {
     private instructions: Instruction[];
     private blocks: BasicBlock[] = [];
@@ -24,12 +32,20 @@ export class CFGBuilder {
         this.instructions = instructions;
     }
 
-    public build(): BasicBlock[] { // <-- Add the return type here
-        console.log("\nBuilding Control Flow Graph...");
+    public build(options?: { silent?: boolean }): BasicBlock[] {
+        const silent = options?.silent ?? false;
+        if (!silent) {
+            console.log("\nBuilding Control Flow Graph...");
+        }
+
         this.partitionBlocks();
         this.resolveEdges();
-        this.printMetrics();
-        return this.blocks; // <-- ADD THIS LINE!
+
+        if (!silent) {
+            this.printMetrics();
+        }
+
+        return this.blocks;
     }
 
     // --- REQUIREMENT 1: Partition into Basic Blocks ---
@@ -117,21 +133,68 @@ export class CFGBuilder {
     }
 
     private printMetrics() {
-        const totalJumps = this.staticJumps + this.dynamicJumps;
-        const staticPct = totalJumps === 0 ? 0 : ((this.staticJumps / totalJumps) * 100).toFixed(2);
+        const stats = this.getJumpResolutionStats();
         console.log(`[CFG] Generated ${this.blocks.length} basic blocks.`);
-        console.log(`[CFG] Jump Resolution: ${this.staticJumps} Static, ${this.dynamicJumps} Dynamic.`);
-        console.log(`[CFG] Statically resolved jump percentage: ${staticPct}%`);
+        console.log(`[CFG] Jump Resolution: ${stats.staticJumps} Static, ${stats.dynamicJumps} Dynamic.`);
+        console.log(`[CFG] Statically resolved jump percentage: ${stats.staticPercentage.toFixed(2)}%`);
+    }
+
+    public getJumpResolutionStats(): JumpResolutionStats {
+        const totalJumps = this.staticJumps + this.dynamicJumps;
+        const staticPercentage = totalJumps === 0
+            ? 0
+            : Number(((this.staticJumps / totalJumps) * 100).toFixed(2));
+        const dynamicPercentage = totalJumps === 0
+            ? 0
+            : Number(((this.dynamicJumps / totalJumps) * 100).toFixed(2));
+
+        return {
+            staticJumps: this.staticJumps,
+            dynamicJumps: this.dynamicJumps,
+            totalJumps,
+            staticPercentage,
+            dynamicPercentage
+        };
     }
 
     // --- REQUIREMENT 4: Export Formats ---
     
-    public getJsonAdjacencyList(): string {
-        const adjacencyList: Record<number, number[]> = {};
+    public getJsonAdjacencyList(includeDynamicMarker: boolean = false): string {
+        const adjacencyList: Record<number, Array<number | "dynamic">> = {};
         for (const block of this.blocks) {
-            adjacencyList[block.id] = block.successors;
+            const successors: Array<number | "dynamic"> = [...block.successors];
+            if (includeDynamicMarker && block.hasDynamicJump) {
+                successors.push("dynamic");
+            }
+            adjacencyList[block.id] = successors;
         }
         return JSON.stringify(adjacencyList, null, 2);
+    }
+
+    public exportToJson(filename: string) {
+        const cfgData = {
+            metadata: {
+                totalBlocks: this.blocks.length,
+                jumpResolution: this.getJumpResolutionStats()
+            },
+            adjacencyList: JSON.parse(this.getJsonAdjacencyList(true)),
+            blocks: this.blocks.map(block => ({
+                id: block.id,
+                startOffset: `0x${block.startOffset.toString(16)}`,
+                successors: block.successors,
+                hasDynamicJump: block.hasDynamicJump,
+                instructionCount: block.instructions.length,
+                instructions: block.instructions.map(inst => ({
+                    offset: `0x${inst.offset.toString(16)}`,
+                    opcode: `0x${inst.opcode.toString(16).padStart(2, '0')}`,
+                    mnemonic: inst.mnemonic,
+                    operand: inst.operand || null
+                }))
+            }))
+        };
+
+        fs.writeFileSync(filename, JSON.stringify(cfgData, null, 2));
+        console.log(`[+] CFG JSON file saved to ${filename}`);
     }
 
     public exportToDot(filename: string, generateSvg: boolean = false) {
@@ -162,7 +225,7 @@ export class CFGBuilder {
         dot += "}\n";
 
         fs.writeFileSync(filename, dot);
-        console.log(`\n[+] DOT file saved to ${filename}`);
+        console.log(`[+] DOT file saved to ${filename}`);
 
         // Handle SVG Generation CLI Flag
         if (generateSvg) {

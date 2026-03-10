@@ -116,6 +116,39 @@ describe('EVM Reverse Engineering Engine - Edge Cases', () => {
             
             consoleSpy.mockRestore();
         });
+
+        it('should mark unresolved jump targets as dynamic in JSON adjacency output', () => {
+            // Block 0 ends with a JUMP but does not include a PUSH-based static destination.
+            const bytecode = '0x565b00';
+            const instructions = disassembleBytecode(bytecode).instructions;
+
+            const cfg = new CFGBuilder(instructions);
+            cfg.build();
+
+            const adjacency = JSON.parse(cfg.getJsonAdjacencyList(true));
+            expect(adjacency['0']).toContain('dynamic');
+
+            const jumpStats = cfg.getJumpResolutionStats();
+            expect(jumpStats.staticJumps).toBe(0);
+            expect(jumpStats.dynamicJumps).toBe(1);
+            expect(jumpStats.staticPercentage).toBe(0);
+            expect(jumpStats.dynamicPercentage).toBe(100);
+        });
+
+        it('should report static jump percentages for statically resolved jumps', () => {
+            // PUSH1 0x03; JUMP; JUMPDEST; STOP
+            const bytecode = '0x6003565b00';
+            const instructions = disassembleBytecode(bytecode).instructions;
+
+            const cfg = new CFGBuilder(instructions);
+            cfg.build();
+
+            const jumpStats = cfg.getJumpResolutionStats();
+            expect(jumpStats.staticJumps).toBe(1);
+            expect(jumpStats.dynamicJumps).toBe(0);
+            expect(jumpStats.staticPercentage).toBe(100);
+            expect(jumpStats.dynamicPercentage).toBe(0);
+        });
     });
 
     describe('3. Network Reliability (Exponential Backoff)', () => {
