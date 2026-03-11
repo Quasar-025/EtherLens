@@ -11,6 +11,14 @@ import { fetchWithBackoff } from './lib/rpc';
 const app = express();
 app.use(express.json());
 
+app.get('/health', (_req: Request, res: Response) => {
+    res.status(200).json({
+        status: "ok",
+        service: "myluganodes-api",
+        timestamp: new Date().toISOString()
+    });
+});
+
 app.post('/analyze', async (req: Request, res: Response) => {
     // SECURITY FIX: Ensure req.body actually exists before trying to destructure it
     if (!req.body || Object.keys(req.body).length === 0) {
@@ -60,15 +68,17 @@ app.post('/analyze', async (req: Request, res: Response) => {
         const adjacencyList = JSON.parse(cfgBuilder.getJsonAdjacencyList(true));
         const jumpResolution = cfgBuilder.getJumpResolutionStats();
 
-        // We capture security logs by hijacking console.log temporarily for the API response
+        // Capture security logs for the API response without leaking global logger state.
         const securityLogs: string[] = [];
         const originalLog = console.log;
-        console.log = (msg: string) => securityLogs.push(msg);
-        
-        const security = new SecurityAnalyzer(instructions, basicBlocks, provider, address);
-        await security.analyze();
-        
-        console.log = originalLog; // Restore console.log
+        console.log = (...args: unknown[]) => securityLogs.push(args.map(arg => String(arg)).join(" "));
+
+        try {
+            const security = new SecurityAnalyzer(instructions, basicBlocks, provider, address);
+            await security.analyze();
+        } finally {
+            console.log = originalLog;
+        }
 
         // --- Structured JSON Report ---
         res.json({

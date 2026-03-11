@@ -5,3 +5,7 @@ cfg.svg
 cli_output.dot
 cli_output.json
 cli_output.svg
+dist
+.env
+.env.local
+.env.production

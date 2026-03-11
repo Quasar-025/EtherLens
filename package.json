@@ -1,9 +1,12 @@
 {
   "name": "myluganodes",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "TypeScript EVM bytecode analyzer with CLI and REST API",
+  "main": "dist/api.js",
   "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/api.js",
+    "dev": "ts-node api.ts",
     "test": "vitest run"
   },
   "bin": {
@@ -13,6 +16,9 @@
   "author": "",
   "license": "ISC",
   "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
     "ethers": "^6.16.0",
     "express": "^5.2.1"
