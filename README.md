@@ -94,6 +94,12 @@ Executable entrypoint:
 - bin/analyzer.js -> ts-node/register -> cli.ts
 
 Usage:
+
+1. 
+```bash
+npm link
+```
+2. 
 ```text
 analyzer <address> --chain <chain> --output <json|text|dot> [flags]
 ```
