@@ -4,6 +4,9 @@ import { BasicBlock } from "./graph";
 import { JsonRpcProvider } from "ethers";
 import { fetchWithBackoff } from "./rpc";
 
+const EXTERNAL_CALL_OPCODES = new Set<number>([0xf1, 0xf4, 0xfa]); // CALL, DELEGATECALL, STATICCALL
+const HALTING_OPCODES = new Set<number>([0x00, 0xf3, 0xfd, 0xfe, 0xff]);
+
 export class SecurityAnalyzer {
     private instructions: Instruction[];
     private blocks: BasicBlock[];
@@ -32,47 +35,62 @@ export class SecurityAnalyzer {
 
     // --- 1. PROXY PATTERN ---
     private async detectProxyPattern() {
-        const hasDelegateCall = this.instructions.some(inst => inst.opcode === 0xf4); // DELEGATECALL
-        if (hasDelegateCall) {
-            const eip1967Slot = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
-            const legacySlot = "0x7050c9e0f4ca769c69bd3a8ef740bc37934f8e2c036e5a723fd8ee048ed3f8c3";
-            try {
-                const val1967 = await fetchWithBackoff(() => this.provider.getStorage(this.address, eip1967Slot));
-                const valLegacy = await fetchWithBackoff(() => this.provider.getStorage(this.address, legacySlot));
-                const isEmpty = (val: string) => val === "0x" || val === "0x0000000000000000000000000000000000000000000000000000000000000000";
+        const delegateCallIndexes = this.instructions
+            .map((inst, index) => (inst.opcode === 0xf4 ? index : -1))
+            .filter(index => index !== -1);
 
-                if (!isEmpty(val1967)) {
-                    console.log(`[!] Pattern 1 (Proxy): EIP-1967 Proxy Detected! Implementation: 0x${val1967.substring(26)}`);
-                } else if (!isEmpty(valLegacy)) {
-                    console.log(`[!] Pattern 1 (Proxy): Legacy Proxy Detected! Implementation: 0x${valLegacy.substring(26)}`);
-                } else {
-                    console.log("[✓] Pattern 1 (Proxy): DELEGATECALL present, but proxy storage slots are empty.");
-                }
-            } catch (error) {
-                console.log("[-] Pattern 1 (Proxy): Failed to query live storage slots.");
+        if (delegateCallIndexes.length === 0) {
+            console.log("[✓] Pattern 1 (Proxy): No DELEGATECALL found. Not a proxy.");
+            return;
+        }
+
+        const hasStorageBackedDelegateCall = delegateCallIndexes.some(index => this.findPreviousOpcode(index, 0x54, 24) !== -1);
+        if (!hasStorageBackedDelegateCall) {
+            console.log("[!] Pattern 1 (Proxy): DELEGATECALL detected, but target does not appear to be storage-backed.");
+            return;
+        }
+
+        const eip1967Slot = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
+        const legacySlot = "0x7050c9e0f4ca769c69bd3a8ef740bc37934f8e2c036e5a723fd8ee048ed3f8c3";
+
+        try {
+            const val1967 = await fetchWithBackoff(() => this.provider.getStorage(this.address, eip1967Slot));
+            const valLegacy = await fetchWithBackoff(() => this.provider.getStorage(this.address, legacySlot));
+
+            const impl1967 = this.extractAddressFromStorageWord(val1967);
+            const implLegacy = this.extractAddressFromStorageWord(valLegacy);
+
+            if (impl1967) {
+                console.log(`[!] Pattern 1 (Proxy): EIP-1967 proxy detected (target sourced from storage). Implementation: ${impl1967}`);
+            } else if (implLegacy) {
+                console.log(`[!] Pattern 1 (Proxy): Legacy proxy detected (target sourced from storage). Implementation: ${implLegacy}`);
+            } else {
+                console.log("[!] Pattern 1 (Proxy): Storage-backed DELEGATECALL detected, but implementation slot values are empty.");
             }
-        } else {
-             console.log("[✓] Pattern 1 (Proxy): No DELEGATECALL found. Not a proxy.");
+        } catch (error) {
+            console.log("[-] Pattern 1 (Proxy): Failed to query live storage slots.");
         }
     }
 
     // --- 2. UNCHECKED EXTERNAL CALLS ---
     private detectUncheckedCalls() {
-        let uncheckedCount = 0;
-        for (let i = 0; i < this.instructions.length - 2; i++) {
+        const uncheckedOffsets: string[] = [];
+
+        for (let i = 0; i < this.instructions.length; i++) {
             const current = this.instructions[i];
-            const isCall = [0xf1, 0xf2, 0xf4, 0xfa].includes(current.opcode); // CALL, CALLCODE, DELEGATECALL, STATICCALL
-            if (isCall) {
-                const next1 = this.instructions[i + 1];
-                const next2 = this.instructions[i + 2];
-                // Prompt specifically asks to detect missing (ISZERO + JUMPI)
-                if (!(next1.opcode === 0x15 && next2.opcode === 0x57)) {
-                    uncheckedCount++;
-                }
+            if (!this.isExternalCallOpcode(current.opcode)) {
+                continue;
+            }
+
+            if (!this.isCallReturnChecked(i)) {
+                uncheckedOffsets.push(`0x${current.offset.toString(16)}`);
             }
         }
-        if (uncheckedCount > 0) {
-            console.log(`[!] Pattern 2 (Unchecked Calls): Detected ${uncheckedCount} potentially unverified external calls.`);
+
+        if (uncheckedOffsets.length > 0) {
+            const preview = uncheckedOffsets.slice(0, 5).join(", ");
+            const suffix = uncheckedOffsets.length > 5 ? ", ..." : "";
+            console.log(`[!] Pattern 2 (Unchecked Calls): Detected ${uncheckedOffsets.length} potentially unverified external calls (missing ISZERO + JUMPI) at offsets: ${preview}${suffix}`);
         } else {
             console.log("[✓] Pattern 2 (Unchecked Calls): All external calls appear to check their return values.");
         }
@@ -80,42 +98,60 @@ export class SecurityAnalyzer {
 
     // --- 3. PAYABLE FUNCTIONS ---
     private detectPayableFunctions() {
-        let hasPayableGuard = false;
-        for (let i = 0; i < Math.min(100, this.instructions.length - 3); i++) {
-            const op1 = this.instructions[i];
-            const op2 = this.instructions[i+1];
-            const op3 = this.instructions[i+2];
-            // Prompt specifically asks for CALLVALUE + ISZERO (+ REVERT implicitly handled by the JUMPI redirect)
-            if ((op1.opcode === 0x34 && op2.opcode === 0x15) || (op1.opcode === 0x34 && op2.opcode === 0x80 && op3.opcode === 0x15)) {
-                hasPayableGuard = true; break;
+        const guardedCallValueOffsets: string[] = [];
+        const unguardedCallValueOffsets: string[] = [];
+
+        for (let i = 0; i < this.instructions.length; i++) {
+            if (this.instructions[i].opcode !== 0x34) {
+                continue;
+            }
+
+            if (this.hasNonPayableGuardFrom(i)) {
+                guardedCallValueOffsets.push(`0x${this.instructions[i].offset.toString(16)}`);
+            } else {
+                unguardedCallValueOffsets.push(`0x${this.instructions[i].offset.toString(16)}`);
             }
         }
-        if (hasPayableGuard) {
-            console.log("[✓] Pattern 3 (Payable): Found non-payable guards (CALLVALUE + ISZERO). Contract differentiates ETH acceptance.");
-        } else {
-            console.log("[!] Pattern 3 (Payable): No global non-payable guard detected. All functions might be payable.");
+
+        if (guardedCallValueOffsets.length > 0 && unguardedCallValueOffsets.length > 0) {
+            console.log(`[!] Pattern 3 (Payable): Found ${guardedCallValueOffsets.length} non-payable guard(s) and ${unguardedCallValueOffsets.length} unguarded CALLVALUE site(s). Contract likely has both non-payable and payable entrypoints.`);
+            return;
         }
+
+        if (guardedCallValueOffsets.length > 0) {
+            console.log(`[✓] Pattern 3 (Payable): Found ${guardedCallValueOffsets.length} non-payable guard(s) using CALLVALUE + ISZERO + JUMPI + REVERT.`);
+            return;
+        }
+
+        if (unguardedCallValueOffsets.length > 0) {
+            const preview = unguardedCallValueOffsets.slice(0, 5).join(", ");
+            const suffix = unguardedCallValueOffsets.length > 5 ? ", ..." : "";
+            console.log(`[!] Pattern 3 (Payable): Detected CALLVALUE usage without non-payable guards at offsets: ${preview}${suffix}. ETH-accepting (payable) paths are likely.`);
+            return;
+        }
+
+        console.log("[✓] Pattern 3 (Payable): No CALLVALUE opcode observed in executable paths.");
     }
 
     // --- 4. SELFDESTRUCT WITH CFG TRACE ---
     private detectSelfDestructAndTrace() {
-        // Find the specific block that contains the 0xff opcode
-        const targetBlock = this.blocks.find(b => b.instructions.some(inst => inst.opcode === 0xff));
-        
-        if (!targetBlock) {
+        const targetBlocks = this.blocks.filter(block => block.instructions.some(inst => inst.opcode === 0xff));
+
+        if (targetBlocks.length === 0) {
             console.log("[✓] Pattern 4 (Selfdestruct): No SELFDESTRUCT opcode found.");
             return;
         }
 
-        console.log(`[!] Pattern 4 (Selfdestruct): HIGH RISK. SELFDESTRUCT found in Block ${targetBlock.id}. Tracing path...`);
-        
-        // DFS Pathfinding algorithm to trace from Block 0 to the target block
-        const path = this.tracePathDFS(0, targetBlock.id, new Set<number>());
-        if (path) {
-            const pathStr = path.map(id => `Block ${id}`).join(" -> ");
-            console.log(`    ↳ Execution Path to destruction: ${pathStr}`);
-        } else {
-            console.log(`    ↳ Could not statically trace a continuous path from Entry to Block ${targetBlock.id} (likely obscured by dynamic jumps).`);
+        console.log(`[!] Pattern 4 (Selfdestruct): HIGH RISK. SELFDESTRUCT found in ${targetBlocks.length} block(s). Tracing CFG paths...`);
+
+        for (const targetBlock of targetBlocks) {
+            const path = this.tracePathDFS(0, targetBlock.id, new Set<number>());
+            if (path) {
+                const pathStr = path.map(id => `Block ${id}`).join(" -> ");
+                console.log(`    -> Execution Path to destruction (Block ${targetBlock.id}): ${pathStr}`);
+            } else {
+                console.log(`    -> Could not statically trace a continuous path from Entry to Block ${targetBlock.id} (likely obscured by dynamic jumps).`);
+            }
         }
     }
 
@@ -138,35 +174,50 @@ export class SecurityAnalyzer {
 
     // --- 5. ACCESS CONTROL (onlyOwner) ---
     private detectAccessControl() {
-        let hasOwnerCheck = false;
-        
-        // Broaden the search window significantly. Compilers often push variables, 
-        // perform other checks, or jump to a modifier block before doing the EQ check.
-        // We look for a block that contains CALLER (msg.sender) and an SLOAD (storage read)
-        // followed eventually by an EQ or REVERT within the same general execution flow.
-        
-        for (const block of this.blocks) {
-            const opcodes = block.instructions.map(inst => inst.opcode);
-            
-            // Check if this single block loads the caller AND reads from storage
-            const hasCaller = opcodes.includes(0x33); // CALLER
-            const hasSload = opcodes.includes(0x54);  // SLOAD
-            
-            if (hasCaller && hasSload) {
-                 // Check if it performs an equality check or branches to a revert
-                 const hasEq = opcodes.includes(0x14); // EQ
-                 const hasRevert = opcodes.includes(0xfd); // REVERT
-                 const hasJumpI = opcodes.includes(0x57); // JUMPI (checking the result)
+        const ownerCheckOffsets: string[] = [];
 
-                 if (hasEq || (hasRevert && hasJumpI)) {
-                     hasOwnerCheck = true;
-                     break;
-                 }
+        for (let i = 0; i < this.instructions.length; i++) {
+            if (this.instructions[i].opcode !== 0x14) { // EQ
+                continue;
+            }
+
+            const lookbackStart = Math.max(0, i - 12);
+            let hasCaller = false;
+            let hasSload = false;
+            for (let j = lookbackStart; j < i; j++) {
+                if (this.instructions[j].opcode === 0x33) {
+                    hasCaller = true;
+                }
+                if (this.instructions[j].opcode === 0x54) {
+                    hasSload = true;
+                }
+            }
+
+            if (!hasCaller || !hasSload) {
+                continue;
+            }
+
+            let hasBranchOrRevert = false;
+            for (let j = i + 1; j < Math.min(i + 8, this.instructions.length); j++) {
+                const opcode = this.instructions[j].opcode;
+                if (opcode === 0x57 || opcode === 0xfd) {
+                    hasBranchOrRevert = true;
+                    break;
+                }
+                if (HALTING_OPCODES.has(opcode)) {
+                    break;
+                }
+            }
+
+            if (hasBranchOrRevert) {
+                ownerCheckOffsets.push(`0x${this.instructions[i].offset.toString(16)}`);
             }
         }
 
-        if (hasOwnerCheck) {
-            console.log("[✓] Pattern 5 (Access Control): Detected CALLER compared to SLOAD logic. Likely uses role-based access modifiers.");
+        if (ownerCheckOffsets.length > 0) {
+            const preview = ownerCheckOffsets.slice(0, 5).join(", ");
+            const suffix = ownerCheckOffsets.length > 5 ? ", ..." : "";
+            console.log(`[✓] Pattern 5 (Access Control): Detected CALLER-vs-SLOAD owner checks around EQ at offsets: ${preview}${suffix}.`);
         } else {
             console.log("[!] Pattern 5 (Access Control): No standard onlyOwner pattern detected statically. Ensure access is restricted where necessary.");
         }
@@ -174,43 +225,230 @@ export class SecurityAnalyzer {
 
     // --- 6. REENTRANCY GUARDS - UPGRADED ---
     private detectReentrancyGuard() {
-        let hasReentrancyGuard = false;
-        
-        // A standard mutex involves writing to storage (SSTORE), making an external call, 
-        // and writing to storage again to unlock. We will scan across block boundaries
-        // to find this general sequence, as it often spans multiple basic blocks.
+        const findings: string[] = [];
 
-        for (let i = 0; i < this.instructions.length - 20; i++) {
-            if (this.instructions[i].opcode === 0x55) { // First SSTORE (Lock)
-                let foundCall = false;
-                
-                // Scan ahead up to 100 instructions (spanning multiple blocks)
-                for (let j = i + 1; j < Math.min(i + 100, this.instructions.length); j++) {
-                    const lookAheadOp = this.instructions[j].opcode;
-                    
-                    if ([0xf1, 0xf2, 0xf4, 0xfa].includes(lookAheadOp)) {
-                        foundCall = true; // Found the external call
-                    }
-                    
-                    // If we found a call, and now we see another SSTORE, it's a mutex pattern
-                    if (foundCall && lookAheadOp === 0x55) {
-                        hasReentrancyGuard = true;
-                        break;
-                    }
-                    
-                    // Optimization: If we hit a halting instruction before the unlock, break early
-                    if ([0x00, 0xf3, 0xfd, 0xfe, 0xff].includes(lookAheadOp)) {
-                        break;
-                    }
-                }
-                if (hasReentrancyGuard) break;
+        for (let i = 0; i < this.instructions.length; i++) {
+            if (!this.isExternalCallOpcode(this.instructions[i].opcode)) {
+                continue;
+            }
+
+            const lockStoreIndex = this.findPreviousOpcode(i, 0x55, 40);
+            const lockLoadIndex = lockStoreIndex !== -1 ? this.findPreviousOpcode(lockStoreIndex, 0x54, 24) : -1;
+            const unlockStoreIndex = this.findNextOpcode(i + 1, 0x55, 60);
+
+            if (lockLoadIndex !== -1 && lockStoreIndex !== -1 && unlockStoreIndex !== -1) {
+                const lockOffset = `0x${this.instructions[lockStoreIndex].offset.toString(16)}`;
+                const callOffset = `0x${this.instructions[i].offset.toString(16)}`;
+                const unlockOffset = `0x${this.instructions[unlockStoreIndex].offset.toString(16)}`;
+                const sameSlot = this.hasMatchingSstoreSlot(lockStoreIndex, unlockStoreIndex);
+                const slotHint = sameSlot ? " (matching storage slot)" : "";
+                findings.push(`mutex pattern SLOAD->SSTORE->CALL->SSTORE${slotHint} at ${lockOffset} -> ${callOffset} -> ${unlockOffset}`);
+                continue;
+            }
+
+            // Fallback CEI heuristic: check branch before state write before external interaction.
+            const effectsStoreIndex = this.findPreviousOpcode(i, 0x55, 24);
+            const checksJumpIndex = effectsStoreIndex !== -1 ? this.findPreviousOpcode(effectsStoreIndex, 0x57, 20) : -1;
+            if (checksJumpIndex !== -1) {
+                const jumpOffset = `0x${this.instructions[checksJumpIndex].offset.toString(16)}`;
+                const storeOffset = `0x${this.instructions[effectsStoreIndex].offset.toString(16)}`;
+                const callOffset = `0x${this.instructions[i].offset.toString(16)}`;
+                findings.push(`checks-effects-interactions pattern at ${jumpOffset} -> ${storeOffset} -> ${callOffset}`);
+                continue;
             }
         }
 
-        if (hasReentrancyGuard) {
-            console.log("[✓] Pattern 6 (Reentrancy Guard): Detected SSTORE -> CALL -> SSTORE sequence. Contract likely implements mutex guards.");
+        if (findings.length > 0) {
+            const preview = findings[0];
+            console.log(`[✓] Pattern 6 (Reentrancy Guard): Detected ${findings.length} guarded interaction path(s). Example: ${preview}.`);
         } else {
             console.log("[!] Pattern 6 (Reentrancy Guard): No standard locking mechanism found spanning external calls.");
         }
+    }
+
+    private isExternalCallOpcode(opcode: number): boolean {
+        return EXTERNAL_CALL_OPCODES.has(opcode);
+    }
+
+    private isPushOpcode(opcode: number): boolean {
+        return opcode >= 0x5f && opcode <= 0x7f;
+    }
+
+    private isStackShapingOpcode(opcode: number): boolean {
+        return opcode >= 0x80 && opcode <= 0x9f;
+    }
+
+    private findPreviousOpcode(fromIndexExclusive: number, targetOpcode: number, maxLookback: number): number {
+        const start = Math.max(0, fromIndexExclusive - maxLookback);
+        for (let i = fromIndexExclusive - 1; i >= start; i--) {
+            if (this.instructions[i].opcode === targetOpcode) {
+                return i;
+            }
+
+            // A hard halt means we do not cross into a previous execution path.
+            if (HALTING_OPCODES.has(this.instructions[i].opcode)) {
+                break;
+            }
+        }
+        return -1;
+    }
+
+    private findNextOpcode(fromIndexInclusive: number, targetOpcode: number, maxLookahead: number): number {
+        const end = Math.min(this.instructions.length, fromIndexInclusive + maxLookahead);
+        for (let i = fromIndexInclusive; i < end; i++) {
+            if (this.instructions[i].opcode === targetOpcode) {
+                return i;
+            }
+
+            if (HALTING_OPCODES.has(this.instructions[i].opcode)) {
+                break;
+            }
+        }
+        return -1;
+    }
+
+    private isCallReturnChecked(callIndex: number): boolean {
+        let isZeroIndex = -1;
+        const isZeroWindowEnd = Math.min(this.instructions.length, callIndex + 12);
+
+        for (let i = callIndex + 1; i < isZeroWindowEnd; i++) {
+            const opcode = this.instructions[i].opcode;
+
+            if (opcode === 0x15) {
+                isZeroIndex = i;
+                break;
+            }
+
+            if (opcode === 0x50 || HALTING_OPCODES.has(opcode) || this.isExternalCallOpcode(opcode)) {
+                return false;
+            }
+
+            if (this.isPushOpcode(opcode) || this.isStackShapingOpcode(opcode)) {
+                continue;
+            }
+
+            return false;
+        }
+
+        if (isZeroIndex === -1) {
+            return false;
+        }
+
+        const jumpWindowEnd = Math.min(this.instructions.length, isZeroIndex + 8);
+        for (let i = isZeroIndex + 1; i < jumpWindowEnd; i++) {
+            const opcode = this.instructions[i].opcode;
+
+            if (opcode === 0x57) {
+                return true;
+            }
+
+            if (opcode === 0x50 || HALTING_OPCODES.has(opcode) || this.isExternalCallOpcode(opcode)) {
+                return false;
+            }
+
+            if (this.isPushOpcode(opcode) || this.isStackShapingOpcode(opcode)) {
+                continue;
+            }
+
+            return false;
+        }
+
+        return false;
+    }
+
+    private hasNonPayableGuardFrom(callValueIndex: number): boolean {
+        let isZeroIndex = -1;
+        const isZeroWindowEnd = Math.min(this.instructions.length, callValueIndex + 5);
+
+        for (let i = callValueIndex + 1; i < isZeroWindowEnd; i++) {
+            const opcode = this.instructions[i].opcode;
+            if (opcode === 0x15) {
+                isZeroIndex = i;
+                break;
+            }
+
+            if (this.isStackShapingOpcode(opcode) || this.isPushOpcode(opcode)) {
+                continue;
+            }
+
+            if (HALTING_OPCODES.has(opcode)) {
+                return false;
+            }
+
+            return false;
+        }
+
+        if (isZeroIndex === -1) {
+            return false;
+        }
+
+        let jumpiIndex = -1;
+        const jumpWindowEnd = Math.min(this.instructions.length, isZeroIndex + 8);
+        for (let i = isZeroIndex + 1; i < jumpWindowEnd; i++) {
+            const opcode = this.instructions[i].opcode;
+            if (opcode === 0x57) {
+                jumpiIndex = i;
+                break;
+            }
+
+            if (this.isPushOpcode(opcode) || this.isStackShapingOpcode(opcode)) {
+                continue;
+            }
+
+            if (HALTING_OPCODES.has(opcode)) {
+                return false;
+            }
+
+            return false;
+        }
+
+        if (jumpiIndex === -1) {
+            return false;
+        }
+
+        const revertWindowEnd = Math.min(this.instructions.length, jumpiIndex + 12);
+        for (let i = callValueIndex + 1; i < revertWindowEnd; i++) {
+            if (this.instructions[i].opcode === 0xfd) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private extractAddressFromStorageWord(value: string): string | null {
+        if (!value || value === "0x") {
+            return null;
+        }
+
+        const rawHex = value.startsWith("0x") ? value.slice(2) : value;
+        if (!/^[0-9a-fA-F]+$/.test(rawHex) || rawHex.length < 40) {
+            return null;
+        }
+
+        const addressHex = rawHex.slice(-40);
+        if (/^0+$/.test(addressHex)) {
+            return null;
+        }
+
+        return `0x${addressHex}`;
+    }
+
+    private hasMatchingSstoreSlot(lockStoreIndex: number, unlockStoreIndex: number): boolean {
+        const lockSlot = this.extractStorageSlotNearSstore(lockStoreIndex);
+        const unlockSlot = this.extractStorageSlotNearSstore(unlockStoreIndex);
+        return lockSlot !== null && unlockSlot !== null && lockSlot === unlockSlot;
+    }
+
+    private extractStorageSlotNearSstore(sstoreIndex: number): string | null {
+        const start = Math.max(0, sstoreIndex - 4);
+        for (let i = sstoreIndex - 1; i >= start; i--) {
+            const inst = this.instructions[i];
+            if (this.isPushOpcode(inst.opcode) && inst.operand) {
+                const normalized = inst.operand.replace(/^0+/, "").toLowerCase();
+                return normalized.length === 0 ? "0" : normalized;
+            }
+        }
+        return null;
     }
 }

@@ -276,4 +276,79 @@ describe('EVM Reverse Engineering Engine - Edge Cases', () => {
             expect(analysis.resolutions[0].error).toContain('network down');
         });
     });
+
+    describe('5. Security Pattern Detector Heuristics', () => {
+        const targetAddress = '0x0000000000000000000000000000000000000001';
+        const eip1967Slot = '0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc';
+        const zeroWord = `0x${'00'.repeat(32)}`;
+
+        const runSecurity = async (bytecode: string, providerOverrides?: Record<string, unknown>) => {
+            const instructions = disassembleBytecode(bytecode).instructions;
+            const cfg = new CFGBuilder(instructions);
+            const blocks = cfg.build({ silent: true });
+
+            const provider = {
+                getStorage: vi.fn(async () => zeroWord),
+                ...(providerOverrides ?? {})
+            } as any;
+
+            const analyzer = new SecurityAnalyzer(instructions, blocks, provider, targetAddress);
+            const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+            try {
+                await analyzer.analyze();
+                const logs = consoleSpy.mock.calls.map(call => String(call[0]));
+                return { logs, provider };
+            } finally {
+                consoleSpy.mockRestore();
+            }
+        };
+
+        it('should detect storage-backed delegatecall proxies and resolve EIP-1967 implementation', async () => {
+            const implAddress = '0x1234567890abcdef1234567890abcdef12345678';
+            const implWord = `0x${'0'.repeat(24)}${implAddress.slice(2)}`;
+
+            const getStorage = vi.fn(async (_address: string, slot: string) => {
+                return slot.toLowerCase() === eip1967Slot ? implWord : zeroWord;
+            });
+
+            const { logs } = await runSecurity('0x600054f400', { getStorage });
+
+            expect(logs.some(log => log.includes('Pattern 1 (Proxy): EIP-1967 proxy detected'))).toBe(true);
+            expect(logs.some(log => log.includes(implAddress))).toBe(true);
+        });
+
+        it('should treat calls with stack-shaping before ISZERO+JUMPI as checked', async () => {
+            const { logs } = await runSecurity('0xf18015600a5700'); // CALL DUP1 ISZERO PUSH1 JUMPI STOP
+
+            expect(logs.some(log => log.includes('Pattern 2 (Unchecked Calls): All external calls appear to check their return values.'))).toBe(true);
+        });
+
+        it('should flag calls that drop return values without ISZERO+JUMPI checks', async () => {
+            const { logs } = await runSecurity('0xf15000'); // CALL POP STOP
+
+            expect(logs.some(log => log.includes('Pattern 2 (Unchecked Calls): Detected 1'))).toBe(true);
+        });
+
+        it('should identify mixed non-payable guards and payable paths', async () => {
+            // CALLVALUE DUP1 ISZERO PUSH1 <ok> JUMPI PUSH1 0 DUP1 REVERT JUMPDEST CALLVALUE POP STOP
+            const { logs } = await runSecurity('0x348015600a57600080fd5b345000');
+
+            expect(logs.some(log => log.includes('Pattern 3 (Payable): Found 1 non-payable guard(s) and 1 unguarded CALLVALUE site(s).'))).toBe(true);
+        });
+
+        it('should detect owner checks when CALLER is compared to SLOAD', async () => {
+            // CALLER PUSH1 00 SLOAD EQ ISZERO PUSH1 JUMPI REVERT STOP
+            const { logs } = await runSecurity('0x336000541415600a57fd00');
+
+            expect(logs.some(log => log.includes('Pattern 5 (Access Control): Detected CALLER-vs-SLOAD owner checks'))).toBe(true);
+        });
+
+        it('should detect mutex-style reentrancy guards around external calls', async () => {
+            // PUSH1 00 SLOAD ISZERO PUSH1 ok JUMPI PUSH1 01 PUSH1 00 SSTORE CALL PUSH1 00 PUSH1 00 SSTORE STOP
+            const { logs } = await runSecurity('0x60005415600d576001600055f1600060005500');
+
+            expect(logs.some(log => log.includes('Pattern 6 (Reentrancy Guard): Detected 1 guarded interaction path(s).'))).toBe(true);
+        });
+    });
 });
