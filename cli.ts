@@ -2,17 +2,26 @@ import { JsonRpcProvider, isAddress } from "ethers";
 import { disassembleBytecode } from "./lib/disassembler";
 import { extractAndResolveSelectors, formatSelectorAnalysis, SelectorAnalysisResult } from "./lib/extractor";
 import { BasicBlock, CFGBuilder } from "./lib/graph";
+import { getSupportedChains, resolveRpcUrl } from "./lib/chains";
 import { SecurityAnalyzer } from "./lib/security";
 import { fetchWithBackoff } from "./lib/rpc";
 
-const RPC_URLS: Record<string, string> = {
-    ethereum: "https://eth.llamarpc.com",
-    polygon: "https://polygon-rpc.com",
-    base: "https://mainnet.base.org",
-    arbitrum: "https://arb1.arbitrum.io/rpc"
-};
-
 const DEFAULT_DISASSEMBLY_PREVIEW_LIMIT = 20;
+const VALID_OUTPUT_FORMATS = new Set(["json", "text", "dot"]);
+
+function getOptionValue(args: string[], flag: string): string | null {
+    const index = args.indexOf(flag);
+    if (index === -1) {
+        return null;
+    }
+
+    const value = args[index + 1];
+    if (!value || value.startsWith("--")) {
+        throw new Error(`Missing value for ${flag}.`);
+    }
+
+    return value;
+}
 
 async function main() {
     const args = process.argv.slice(2);
@@ -20,6 +29,8 @@ async function main() {
     if (args.length === 0 || args.includes("--help")) {
         console.log("Usage: analyzer <address> --chain <chain> --output <json|text|dot> [flags]");
         console.log("Flags: --disasm, --selectors, --cfg, --security, --svg");
+        console.log(`Supported chains: ${getSupportedChains().join(", ")}`);
+        console.log("RPC URLs can be configured with ETHEREUM_RPC_URL, POLYGON_RPC_URL, BASE_RPC_URL, ARBITRUM_RPC_URL.");
         console.log(`Default disassembly output is preview mode (${DEFAULT_DISASSEMBLY_PREVIEW_LIMIT} rows). Use --disasm for full output.`);
         console.log("Use --svg with --output dot to generate an SVG if Graphviz is installed.");
         return;
@@ -29,11 +40,25 @@ async function main() {
     const address = args.find(a => isAddress(a));
     if (!address) return console.error("Error: Please provide a valid Ethereum contract address.");
 
-    const chainIndex = args.indexOf("--chain");
-    const chain = chainIndex !== -1 ? args[chainIndex + 1].toLowerCase() : "ethereum";
-    
-    const outputIndex = args.indexOf("--output");
-    const outputFormat = outputIndex !== -1 ? args[outputIndex + 1].toLowerCase() : "text";
+    let chainInput = "ethereum";
+    let outputFormat = "text";
+    try {
+        const chainValue = getOptionValue(args, "--chain");
+        const outputValue = getOptionValue(args, "--output");
+
+        if (chainValue) {
+            chainInput = chainValue;
+        }
+
+        if (outputValue) {
+            outputFormat = outputValue.toLowerCase();
+            if (!VALID_OUTPUT_FORMATS.has(outputFormat)) {
+                return console.error(`Error: Unsupported output format '${outputValue}'. Supported: json, text, dot`);
+            }
+        }
+    } catch (error: any) {
+        return console.error(`Error: ${error.message}`);
+    }
 
     const runDisasm = args.includes("--disasm");
     const runSelectors = args.includes("--selectors");
@@ -44,8 +69,11 @@ async function main() {
     // If no specific flags are provided, run everything
     const runAll = !runDisasm && !runSelectors && !runCfg && !runSecurity;
 
-    const rpcUrl = RPC_URLS[chain];
-    if (!rpcUrl) return console.error(`Error: Unsupported chain '${chain}'. Supported: ${Object.keys(RPC_URLS).join(", ")}`);
+    const resolvedChain = resolveRpcUrl(chainInput);
+    if (!resolvedChain) {
+        return console.error(`Error: Unsupported chain '${chainInput}'. Supported: ${getSupportedChains().join(", ")}`);
+    }
+    const { chain, rpcUrl } = resolvedChain;
     
     const provider = new JsonRpcProvider(rpcUrl);
 

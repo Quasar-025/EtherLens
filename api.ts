@@ -4,19 +4,12 @@ import { JsonRpcProvider, isAddress } from 'ethers';
 import { disassembleBytecode } from './lib/disassembler';
 import { extractAndResolveSelectors } from './lib/extractor';
 import { CFGBuilder } from './lib/graph';
+import { getSupportedChains, resolveRpcUrl } from './lib/chains';
 import { SecurityAnalyzer } from './lib/security';
 import { fetchWithBackoff } from './lib/rpc';
 
 const app = express();
 app.use(express.json());
-
-// Support Ethereum Mainnet and multiple L2s as requested by the rubric
-const RPC_URLS: Record<string, string> = {
-    ethereum: "https://eth.llamarpc.com",
-    polygon: "https://polygon-rpc.com",
-    base: "https://mainnet.base.org",
-    arbitrum: "https://arb1.arbitrum.io/rpc"
-};
 
 app.post('/analyze', async (req: Request, res: Response) => {
     // SECURITY FIX: Ensure req.body actually exists before trying to destructure it
@@ -32,14 +25,21 @@ app.post('/analyze', async (req: Request, res: Response) => {
         return;
     }
 
-    const rpcUrl = RPC_URLS[chain.toLowerCase()];
-    if (!rpcUrl) {
-        res.status(400).json({ error: `Unsupported chain. Supported: ${Object.keys(RPC_URLS).join(", ")}` });
+    if (typeof chain !== "string" || chain.trim().length === 0) {
+        res.status(400).json({ error: "Invalid chain value. Chain must be a non-empty string." });
         return;
     }
 
+    const resolvedChain = resolveRpcUrl(chain);
+    if (!resolvedChain) {
+        res.status(400).json({ error: `Unsupported chain. Supported: ${getSupportedChains().join(", ")}` });
+        return;
+    }
+
+    const { chain: normalizedChain, rpcUrl } = resolvedChain;
+
     try {
-        console.log(`[API] Fetching bytecode for ${address} on ${chain}...`);
+        console.log(`[API] Fetching bytecode for ${address} on ${normalizedChain}...`);
         const provider = new JsonRpcProvider(rpcUrl);
         
         // Use our robust exponential backoff wrapper!
@@ -75,7 +75,7 @@ app.post('/analyze', async (req: Request, res: Response) => {
             success: true,
             metadata: {
                 address: address,
-                chain: chain,
+                chain: normalizedChain,
                 totalInstructions: instructions.length,
                 totalBlocks: basicBlocks.length,
                 jumpResolution: {
