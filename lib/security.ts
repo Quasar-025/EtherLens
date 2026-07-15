@@ -172,7 +172,8 @@ export class SecurityAnalyzer {
         return null;
     }
 
-    // --- 5. ACCESS CONTROL (onlyOwner) ---
+    // --- 5. ACCESS CONTROL (onlyOwner) --- 
+    // CALLER -> SLOAD -> (Comparison) -> JUMPI / REVERT
     private detectAccessControl() {
         const ownerCheckOffsets: string[] = [];
 
@@ -224,6 +225,7 @@ export class SecurityAnalyzer {
     }
 
     // --- 6. REENTRANCY GUARDS - UPGRADED ---
+    // SLOAD EQ & JUMPI SSTORE CALL SSTORE
     private detectReentrancyGuard() {
         const findings: string[] = [];
 
@@ -273,7 +275,7 @@ export class SecurityAnalyzer {
     private isPushOpcode(opcode: number): boolean {
         return opcode >= 0x5f && opcode <= 0x7f;
     }
-
+    // DUP SWAP
     private isStackShapingOpcode(opcode: number): boolean {
         return opcode >= 0x80 && opcode <= 0x9f;
     }
@@ -337,7 +339,7 @@ export class SecurityAnalyzer {
         const jumpWindowEnd = Math.min(this.instructions.length, isZeroIndex + 8);
         for (let i = isZeroIndex + 1; i < jumpWindowEnd; i++) {
             const opcode = this.instructions[i].opcode;
-
+            // JUMPI
             if (opcode === 0x57) {
                 return true;
             }

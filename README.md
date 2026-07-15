@@ -1,4 +1,4 @@
-# myLuganodes
+# EtherLens
 
 A TypeScript EVM bytecode analyzer with:
 - CLI analysis for deployed contracts
@@ -221,19 +221,19 @@ Suggested baseline values are in .env.example.
 ### 3. Verify deployment
 Health check:
 ```bash
-curl https://luganodes-production.up.railway.app/health
+curl https://etherlens-production.up.railway.app/health
 ```
 
 Analyze endpoint check:
 ```bash
-curl -X POST https://luganodes-production.up.railway.app/analyze \
+curl -X POST https://etherlens-production.up.railway.app/analyze \
   -H "Content-Type: application/json" \
   -d '{"address":"0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2","chain":"ethereum"}'
 ```
 
 ## Live URLs
-- Backend API (Railway): https://luganodes-production.up.railway.app
-- Backend Health: https://luganodes-production.up.railway.app/health
+- Backend API (Railway): https://etherlens-production.up.railway.app
+- Backend Health: https://etherlens-production.up.railway.app/health
 - Frontend: Deferred for this milestone (no frontend app currently in this repository)
 
 ## Analyzer Pipeline

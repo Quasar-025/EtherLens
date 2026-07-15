@@ -14,7 +14,7 @@ app.use(express.json());
 app.get('/health', (_req: Request, res: Response) => {
     res.status(200).json({
         status: "ok",
-        service: "myluganodes-api",
+        service: "etherlens-api",
         timestamp: new Date().toISOString()
     });
 });

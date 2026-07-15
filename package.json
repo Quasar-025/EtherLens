@@ -1,5 +1,5 @@
 {
-  "name": "myluganodes",
+  "name": "etherlens",
   "version": "1.0.0",
   "description": "TypeScript EVM bytecode analyzer with CLI and REST API",
   "main": "dist/api.js",
